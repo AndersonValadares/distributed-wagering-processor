@@ -130,7 +130,7 @@ export class WagerConsumer {
     } catch (error) {
       const permanent = PERMANENT.some((type) => error instanceof type);
       const received = Number(message.Attributes?.['ApproximateReceiveCount'] ?? 1);
-            inc('wager_consumer_retries_total', { kind: permanent ? 'permanent' : 'transient' });
+      inc('wager_consumer_retries_total', { kind: permanent ? 'permanent' : 'transient' });
       if (permanent && received >= 5) inc('wager_dlq_messages_total');
       this.log(permanent ? 'permanent_error' : 'transient_error', {
         messageId: message.MessageId,
