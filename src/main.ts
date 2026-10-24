@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from './app.module.ts';
 import { OutboxPublisher } from './messaging/outbox-publisher.ts';
+import { PendingReferenceWorker } from './messaging/pending-reference-worker.ts';
 import { createSqsClient, ensureQueues } from './messaging/sqs.ts';
 import { WagerConsumer } from './messaging/wager-consumer.ts';
 import { SubmitTransactionUseCase } from './wagering/submit-transaction.ts';
@@ -10,32 +11,46 @@ import { SubmitTransactionUseCase } from './wagering/submit-transaction.ts';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const app = await NestFactory.create(AppModule);
+const orm = app.get(MikroORM) as unknown as ConstructorParameters<typeof OutboxPublisher>[0];
 const sqs = createSqsClient();
 const queues = await ensureQueues(sqs);
 
 const consumer = new WagerConsumer(app.get(SubmitTransactionUseCase), sqs, queues.main);
 consumer.start();
 
-const publisher = new OutboxPublisher(app.get(MikroORM), sqs, queues.events);
-let publishing = true;
-const publisherLoop = (async () => {
-  while (publishing) {
-    try {
-      const r = await publisher.runOnce();
-      if (r.published + r.failed === 0) await sleep(1000);
-    } catch {
-      await sleep(2000);
+// Loops de fundo: publisher da outbox e worker de PENDING_REFERENCE.
+let running = true;
+function background(work: () => Promise<number>, idleMs: number): Promise<void> {
+  return (async () => {
+    while (running) {
+      try {
+        if ((await work()) === 0) await sleep(idleMs);
+      } catch {
+        await sleep(2000);
+      }
     }
-  }
-})();
+  })();
+}
+const publisher = new OutboxPublisher(orm, sqs, queues.events);
+const referenceWorker = new PendingReferenceWorker(orm);
+const loops = [
+  background(async () => {
+    const r = await publisher.runOnce();
+    return r.published + r.failed;
+  }, 1000),
+  background(async () => {
+    const r = await referenceWorker.runOnce();
+    return r.processed + r.rejected + r.waiting + r.failed;
+  }, 2000),
+];
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   await consumer.stop(); // conclui a mensagem em andamento
-  publishing = false;
-  await publisherLoop;
+  running = false;
+  await Promise.all(loops);
   await app.close(); // fecha HTTP e banco
   process.exit(0);
 }
