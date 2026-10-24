@@ -7,9 +7,10 @@ import { HealthController } from './health/health.controller.ts';
 import { DomainExceptionFilter } from './http/domain-exception.filter.ts';
 import { CreateWalletUseCase } from './wallet/create-wallet.ts';
 import { WalletsController } from './wallet/wallets.controller.ts';
+import { QueriesController } from './wallet/queries.controller.ts';
 
 @Module({
-  controllers: [HealthController, WalletsController, TransactionsController],
+  controllers: [HealthController, WalletsController, TransactionsController, QueriesController],
   providers: [
     {
       provide: MikroORM,

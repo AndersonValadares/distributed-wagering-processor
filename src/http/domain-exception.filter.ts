@@ -1,3 +1,4 @@
+import { NotFoundError } from '../wallet/queries.controller.ts';
 import {
   Catch,
   HttpException,
@@ -56,7 +57,7 @@ function translate(error: unknown): Translated {
       message: error.message,
     };
   }
-  if (error instanceof WalletNotFoundError) {
+  if (error instanceof WalletNotFoundError || error instanceof NotFoundError) {
     return { status: 404, code: error.code, message: error.message };
   }
   if (error instanceof IdempotencyConflictError || error instanceof WalletAlreadyExistsError) {
