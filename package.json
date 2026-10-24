@@ -5,7 +5,10 @@
   "private": true,
   "scripts": {
     "start": "bun run src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "bun run src/migrate.ts up",
+    "migrate:down": "bun run src/migrate.ts down",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.4.3",
