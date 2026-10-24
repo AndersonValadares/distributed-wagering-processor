@@ -55,7 +55,6 @@ Ver tabela no README. Regra: erros de domínio passam por um único filtro (`Dom
 
 ## Limitações conhecidas
 
-- Eventos de integração são JSON montado no use case, **não** classes `IntegrationEvent` (sem tipagem por subclasse).
 - Erro permanente do consumer depende do redrive do SQS (5 recebimentos) em vez de DLQ explícita.
 - SIGTERM verificado manualmente, sem teste automatizado; não há teste automatizado de reinício do serviço inteiro.
 - Sem teste de carga e sem double-entry.
@@ -63,5 +62,5 @@ Ver tabela no README. Regra: erros de domínio passam por um único filtro (`Dom
 - Migrations: o runner aplica `.up.sql` em ordem e `migrate:down` desfaz só a última.
 - Observabilidade parcial: logs JSON existem no consumer e na reconciliação; o restante da aplicação usa o logger padrão do NestJS (sem `correlationId` em todas as linhas).
 - Em ambiente de teste o outbox acumula eventos pendentes (os testes não rodam o publisher); em produção o publisher roda continuamente.
-- A wallet inexistente numa mensagem SQS é tratada como erro permanente (vai para a DLQ após 5 recebimentos), embora uma wallet criada logo depois pudesse resolver o caso.
+- Wallet inexistente numa mensagem SQS é tratada como erro permanente (vai para a DLQ após 5 recebimentos), embora uma wallet criada logo depois pudesse resolver o caso.
 - Os eventos da outbox usam o envelope (`eventId`, `eventType`, `aggregateId`, `correlationId`, `occurredAt`, `version`, `data`), sem `causationId` e sem subclasses de `IntegrationEvent`.
