@@ -19,7 +19,7 @@ bun run migrate             # aplica as migrations em ordem
 bun run start               # API em http://localhost:3000
 ```
 
-As filas (`wager-transactions.fifo`, `wager-transactions-dlq.fifo`, `wager-events.fifo`) são criadas automaticamente na inicialização.
+As filas (`wager-transactions.fifo`, `wager-transactions-dlq.fifo`, `wager-events.fifo`) são criadas automaticamente na inicialização. Variáveis opcionais: `PORT` (3000), `SQS_ENDPOINT` (http://localhost:4566), `AWS_REGION` (us-east-1). O `.env.example` já traz um `DATABASE_URL` coerente com o `docker-compose.yml`. Para rodar os testes, o banco precisa estar migrado (`bun run migrate`).
 
 ## Comandos
 
@@ -43,6 +43,7 @@ As filas (`wager-transactions.fifo`, `wager-transactions-dlq.fifo`, `wager-event
 | `GET /wagering/transactions/:transactionId` | consulta por id interno |
 | `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | consulta por id do provedor |
 | `GET /health/live`, `GET /health/ready` | liveness e readiness (sem autenticação) |
+| `GET /metrics` | métricas em formato Prometheus |
 
 ### Status HTTP
 
@@ -74,11 +75,13 @@ Os testes usam PostgreSQL e SQS reais (sem mocks). Destaques:
 - duas apostas de 80.00 sobre saldo 100.00: uma `PROCESSED`, uma `REJECTED`, saldo 20.00
 - a mesma aposta 50 vezes em paralelo: um único débito
 - **3 processos `bun` separados** disputando a mesma wallet (`src/testing/multi-instance.test.ts`)
-- dois publishers e dois workers concorrentes sobre as mesmas filas de trabalho
-- worker "morto" depois do commit e antes do ack: a reentrega é ignorada pelo inbox
+- dois publishers concorrentes sobre a mesma outbox e dois workers concorrentes sobre as mesmas transações em `PENDING_REFERENCE`
+- worker morto depois do commit e antes do ack (simulado: o use case é chamado direto e a mensagem continua na fila): a reentrega é ignorada pelo inbox
 - mensagem inválida segue para a DLQ após 5 recebimentos
 - invariante final: saldo da wallet = saldo reconstruído pelo ledger
 
 Os testes isolam dados por provider aleatório; `clearPending()` em `outbox-publisher.test.ts` marca eventos pendentes como publicados e **só deve rodar em banco de teste**.
+
+Não há teste automatizado de reinício do serviço inteiro nem de SIGTERM (verificado manualmente); veja as limitações no ARCHITECTURE.md.
 
 Decisões e limitações: veja [ARCHITECTURE.md](ARCHITECTURE.md).

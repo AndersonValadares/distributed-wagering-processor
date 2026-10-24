@@ -7,7 +7,7 @@ import { backoffSeconds } from './outbox-publisher.ts';
 
 type Row = Record<string, any>;
 
-/** Limite de tentativas: com backoff 2s, 4s, 8s... são cerca de 8 minutos de espera pela referência. */
+/** Limite de tentativas: com backoff 2s, 4s, 8s... são cerca de 4 minutos de espera pela referência. */
 export const MAX_REFERENCE_ATTEMPTS = 8;
 
 export type ReferenceWorkResult = {

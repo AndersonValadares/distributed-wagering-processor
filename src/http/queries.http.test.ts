@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../app.module.ts';
+import { MikroORM } from '@mikro-orm/postgresql';
 
 let app!: INestApplication;
 let base = '';
@@ -82,6 +83,26 @@ describe('consultas', () => {
     expect(seen.length).toBe(5); // OPENING + 4 apostas
     expect(new Set(seen).size).toBe(5);
     expect((await json(`/wallets/${w.id}/ledger?cursor=lixo`)).status).toBe(400);
+  });
+    test('wallet com saldo divergente do ledger: consistent false, sem correção silenciosa', async () => {
+    const w = await setup();
+    const orm = app.get(MikroORM);
+    await orm.em.fork().execute(
+      `UPDATE wallet SET balance_cents = balance_cents + 500 WHERE id = ?::uuid`,
+      [w.id],
+    );
+    const res = await post(`/wallets/${w.id}/reconciliation`, {});
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.consistent).toBe(false);
+    expect(body.difference.amount).toBe('5.00');
+
+    // não foi corrigida: o saldo armazenado continua divergente
+    const again = (await (await post(`/wallets/${w.id}/reconciliation`, {})).json()) as any;
+    expect(again.consistent).toBe(false);
+
+    const metrics = await (await fetch(base + '/metrics')).text();
+    expect(metrics).toContain('wager_reconciliation_divergences_total');
   });
 });
 

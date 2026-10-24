@@ -2,6 +2,7 @@ import { Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { ValidationError } from '../http/parsers.ts';
 import { WalletNotFoundError } from '../wagering/submit-transaction.ts';
+import { inc } from '../observability/metrics.ts';
 
 type Row = Record<string, any>;
 
@@ -166,6 +167,7 @@ export class QueriesController {
     const diff = BigInt(r.stored) - BigInt(r.calculated);
     const consistent = diff === 0n;
     if (!consistent) {
+      inc('wager_reconciliation_divergences_total');
       console.log(
         JSON.stringify({ level: 'error', event: 'reconciliation_divergence', walletId, difference: dec(diff.toString()) }),
       );
