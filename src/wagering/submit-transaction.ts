@@ -58,6 +58,25 @@ export class SubmitTransactionUseCase {
   constructor(private readonly orm: MikroORM) {}
 
   async execute(input: SubmitInput): Promise<SubmitResult> {
+    const result = await this.executeInternal(input, undefined);
+    return result!;
+  }
+
+  /**
+   * Vindo do SQS: o registro no inbox entra na MESMA transação SQL da mudança financeira.
+   * Devolve undefined quando a mensagem já foi processada (duplicata).
+   */
+  async executeFromMessage(
+    input: SubmitInput,
+    inbox: { consumerName: string; messageId: string },
+  ): Promise<SubmitResult | undefined> {
+    return this.executeInternal(input, inbox);
+  }
+
+  private async executeInternal(
+    input: SubmitInput,
+    inbox: { consumerName: string; messageId: string } | undefined,
+  ): Promise<SubmitResult | undefined> {
     const payloadHash = computePayloadHash(input);
     // Valida a entrada ANTES de tocar no banco (OPENING, referência ausente, valor zero...).
     const tx = WagerTransaction.create({
@@ -66,8 +85,21 @@ export class SubmitTransactionUseCase {
       payloadHash,
       createdAt: new Date(),
     });
-    // Tudo abaixo roda numa única transação SQL. Se lançar erro, volta tudo (ROLLBACK).
-    return this.orm.em.fork().transactional((em) => this.run(em, tx));
+    return this.orm.em.fork().transactional(async (em) => {
+      if (inbox) {
+        // A PK (consumer_name, message_id) é quem deduplica, inclusive entre instâncias.
+        const inserted = await query(
+          em,
+          `INSERT INTO inbox_message (consumer_name, message_id, payload_hash, processed_at)
+           VALUES (?, ?, ?, now())
+           ON CONFLICT DO NOTHING
+           RETURNING message_id`,
+          [inbox.consumerName, inbox.messageId, payloadHash],
+        );
+        if (inserted.length === 0) return undefined;
+      }
+      return this.run(em, tx);
+    });
   }
 
   private async run(em: EntityManager, tx: WagerTransaction): Promise<SubmitResult> {
