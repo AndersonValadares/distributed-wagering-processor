@@ -47,6 +47,8 @@ HTTP e SQS reutilizam o mesmo use case. O domínio (`Money`, `Wallet`, `WagerTra
 
 **Health.** `/health/live` não toca em dependências; `/health/ready` checa PostgreSQL e SQS (timeout de 2s) e devolve 503 se qualquer um falhar.
 
+**Health.** `/health/live` não toca em dependências; `/health/ready` checa PostgreSQL e SQS (timeout de 2s) e devolve 503 com o detalhe de cada check.
+
 ## Mapeamento HTTP
 
 Ver tabela no README. Regra: erros de domínio passam por um único filtro (`DomainExceptionFilter`), consistente entre endpoints; 422 e 202 são respostas do fluxo de negócio.
