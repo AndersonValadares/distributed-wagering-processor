@@ -3,7 +3,7 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
-   "scripts": {
+  "scripts": {
     "start": "bun run src/main.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -12,6 +12,7 @@
     "typescript": "5"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1156.0",
     "@mikro-orm/core": "^7.2.5",
     "@mikro-orm/migrations": "^7.2.5",
     "@mikro-orm/postgresql": "^7.2.5",
