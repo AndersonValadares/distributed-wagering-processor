@@ -49,13 +49,14 @@ HTTP e SQS reutilizam o mesmo use case. O domínio (`Money`, `Wallet`, `WagerTra
 
 **Health.** `/health/live` não toca em dependências; `/health/ready` checa PostgreSQL e SQS (timeout de 2s) e devolve 503 com o detalhe de cada check.
 
+**Métricas.** `GET /metrics` (formato Prometheus). Valores que vivem no banco (transações por status, outbox pendente e lag, `PENDING_REFERENCE`, inbox) são calculados por consulta e valem para todas as instâncias. Contadores de processo (duplicatas, conflitos de idempotência, retries do consumer, mensagens na DLQ, histograma de latência) ficam em memória por instância e devem ser somados pelo coletor. Limitação: conflitos de lock não são medidos diretamente (o lock pessimista espera, não falha); o tempo de espera aparece no histograma de latência.
+
 ## Mapeamento HTTP
 
 Ver tabela no README. Regra: erros de domínio passam por um único filtro (`DomainExceptionFilter`), consistente entre endpoints; 422 e 202 são respostas do fluxo de negócio.
 
 ## Limitações conhecidas
 
-- Métricas (contadores, latência, outbox lag) **não** implementadas; observabilidade se resume a logs JSON no consumer e nos logs de reconciliação divergente.
 - Eventos de integração são JSON montado no use case, **não** classes `IntegrationEvent` (sem tipagem por subclasse).
 - `wallet-repository.ts` (versão inicial do débito) permanece no repositório só por seus testes de concorrência; não é usado em produção.
 - Erro permanente do consumer depende do redrive do SQS (5 recebimentos) em vez de DLQ explícita.

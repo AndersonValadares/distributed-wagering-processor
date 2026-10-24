@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { Money } from '../shared/money.ts';
+import { inc, observeLatency } from '../observability/metrics.ts';
 import { Wallet } from '../wallet/wallet.ts';
 import { applyTransaction } from './apply-transaction.ts';
 import type { FailureCode } from './failure-code.ts';
@@ -79,27 +80,40 @@ export class SubmitTransactionUseCase {
   ): Promise<SubmitResult | undefined> {
     const payloadHash = computePayloadHash(input);
     // Valida a entrada ANTES de tocar no banco (OPENING, referência ausente, valor zero...).
-    const tx = WagerTransaction.create({
+    const started = performance.now();
+        const tx = WagerTransaction.create({
       id: crypto.randomUUID(),
       ...input,
       payloadHash,
       createdAt: new Date(),
     });
-    return this.orm.em.fork().transactional(async (em) => {
-      if (inbox) {
-        // A PK (consumer_name, message_id) é quem deduplica, inclusive entre instâncias.
-        const inserted = await query(
-          em,
-          `INSERT INTO inbox_message (consumer_name, message_id, payload_hash, processed_at)
-           VALUES (?, ?, ?, now())
-           ON CONFLICT DO NOTHING
-           RETURNING message_id`,
-          [inbox.consumerName, inbox.messageId, payloadHash],
-        );
-        if (inserted.length === 0) return undefined;
-      }
-      return this.run(em, tx);
-    });
+    try {
+      const result = await this.orm.em.fork().transactional(async (em) => {
+        if (inbox) {
+          // A PK (consumer_name, message_id) é quem deduplica, inclusive entre instâncias.
+          const inserted = await query(
+            em,
+            `INSERT INTO inbox_message (consumer_name, message_id, payload_hash, processed_at)
+             VALUES (?, ?, ?, now())
+             ON CONFLICT DO NOTHING
+             RETURNING message_id`,
+            [inbox.consumerName, inbox.messageId, payloadHash],
+          );
+          if (inserted.length === 0) return undefined;
+        }
+        return this.run(em, tx);
+      });
+      if (result === undefined) inc('wager_duplicates_total', { source: 'inbox' });
+      else if (result.idempotentReplay) inc('wager_duplicates_total', { source: 'idempotency' });
+      else inc('wager_transactions_total', { status: result.status });
+      return result;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) inc('wager_idempotency_conflicts_total');
+      else inc('wager_processing_errors_total');
+      throw error;
+    } finally {
+      observeLatency(performance.now() - started);
+    }
   }
 
   private async run(em: EntityManager, tx: WagerTransaction): Promise<SubmitResult> {
