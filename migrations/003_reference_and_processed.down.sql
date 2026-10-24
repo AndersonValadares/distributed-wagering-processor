@@ -1,0 +1,3 @@
+ALTER TABLE wager_transaction DROP CONSTRAINT wager_tx_failure_code_required;
+ALTER TABLE wager_transaction DROP COLUMN processed_at;
+ALTER TABLE wager_transaction DROP COLUMN reference_external_transaction_id;

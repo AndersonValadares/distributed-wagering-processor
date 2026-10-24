@@ -1,0 +1,458 @@
+=== package.json ===
+{
+  "name": "jungle-backend-challenge",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "5"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.2.0",
+    "@nestjs/core": "^12.2.0",
+    "@nestjs/platform-express": "^12.2.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  }
+}
+
+=== migrations/001_init.sql ===
+CREATE TABLE wallet (
+  id uuid PRIMARY KEY,
+  player_id uuid NOT NULL,
+  currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
+  balance_cents bigint NOT NULL CHECK (balance_cents >= 0),
+  version integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT wallet_player_currency_key UNIQUE (player_id, currency)
+);
+
+CREATE TABLE wager_transaction (
+  id uuid PRIMARY KEY,
+  provider_id text NOT NULL,
+  external_transaction_id text NOT NULL,
+  idempotency_key text NOT NULL,
+  payload_hash text NOT NULL,
+  wallet_id uuid NOT NULL REFERENCES wallet(id),
+  player_id uuid NOT NULL,
+  round_id text NOT NULL,
+  game_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK')),
+  currency char(3) NOT NULL,
+  amount_cents bigint NOT NULL CHECK (amount_cents >= 0),
+  status text NOT NULL CHECK (status IN ('PROCESSED', 'REJECTED', 'PENDING_REFERENCE', 'FAILED')),
+  failure_code text,
+  reference_transaction_id uuid REFERENCES wager_transaction(id),
+  balance_after_cents bigint CHECK (balance_after_cents >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT wager_transaction_provider_external_key UNIQUE (provider_id, external_transaction_id),
+  CONSTRAINT wager_transaction_idempotency_key_key UNIQUE (idempotency_key)
+);
+
+-- Cada transação pode ser revertida no máximo uma vez
+CREATE UNIQUE INDEX one_reversal_per_transaction
+  ON wager_transaction (reference_transaction_id)
+  WHERE kind IN ('REFUND', 'ROLLBACK') AND status = 'PROCESSED';
+
+CREATE TABLE wallet_ledger_entry (
+  id uuid PRIMARY KEY,
+  wallet_id uuid NOT NULL REFERENCES wallet(id),
+  transaction_id uuid NOT NULL UNIQUE REFERENCES wager_transaction(id),
+  direction text NOT NULL CHECK (direction IN ('DEBIT', 'CREDIT')),
+  amount_cents bigint NOT NULL CHECK (amount_cents > 0),
+  balance_after_cents bigint NOT NULL CHECK (balance_after_cents >= 0),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Ledger imutável: bloqueia UPDATE e DELETE
+CREATE FUNCTION forbid_ledger_change() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'wallet_ledger_entry é imutável';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER wallet_ledger_immutable
+  BEFORE UPDATE OR DELETE ON wallet_ledger_entry
+  FOR EACH ROW EXECUTE FUNCTION forbid_ledger_change();
+
+CREATE TABLE inbox_message (
+  consumer_name text NOT NULL,
+  message_id text NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (consumer_name, message_id)
+);
+
+CREATE TABLE outbox_message (
+  id uuid PRIMARY KEY,
+  aggregate_id uuid NOT NULL,
+  event_type text NOT NULL,
+  payload jsonb NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  published_at timestamptz,
+  attempts integer NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Índice parcial: a busca de eventos pendentes continua barata
+CREATE INDEX outbox_pending_idx
+  ON outbox_message (next_attempt_at)
+  WHERE published_at IS NULL;
+=== src/main.ts ===
+export {};
+
+=== src/shared/money.ts ===
+export type MoneyErrorCode =
+  | 'INVALID_AMOUNT'
+  | 'INVALID_CURRENCY'
+  | 'CURRENCY_MISMATCH'
+  | 'NEGATIVE_RESULT';
+
+export class MoneyError extends Error {
+  constructor(
+    readonly code: MoneyErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'MoneyError';
+  }
+}
+
+const CURRENCY_PATTERN = /^[A-Z]{3}$/;
+const DECIMAL_PATTERN = /^\d+(\.\d{1,2})?$/;
+
+function assertCurrency(currency: string): string {
+  if (!CURRENCY_PATTERN.test(currency)) {
+    throw new MoneyError('INVALID_CURRENCY', `moeda inválida: ${currency}`);
+  }
+  return currency;
+}
+
+export class Money {
+  private constructor(
+    readonly cents: bigint,
+    readonly currency: string,
+  ) {}
+
+  /** Valor já em centavos. Não aceita negativos. */
+  static fromCents(cents: bigint, currency: string): Money {
+    if (cents < 0n) {
+      throw new MoneyError('INVALID_AMOUNT', 'valor não pode ser negativo');
+    }
+    return new Money(cents, assertCurrency(currency));
+  }
+
+  /** Texto decimal, como "25.00" ou "25.5". Sem notação científica, sem vírgula, sem sinal. */
+  static fromDecimal(value: string, currency: string): Money {
+    if (!DECIMAL_PATTERN.test(value)) {
+      throw new MoneyError('INVALID_AMOUNT', `valor inválido: ${value}`);
+    }
+    const [whole = '0', fraction = ''] = value.split('.');
+    const cents = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+    return new Money(cents, assertCurrency(currency));
+  }
+
+  add(other: Money): Money {
+    this.assertSameCurrency(other);
+    return new Money(this.cents + other.cents, this.currency);
+  }
+
+  subtract(other: Money): Money {
+    this.assertSameCurrency(other);
+    if (other.cents > this.cents) {
+      throw new MoneyError('NEGATIVE_RESULT', 'subtração resultaria em valor negativo');
+    }
+    return new Money(this.cents - other.cents, this.currency);
+  }
+
+  isZero(): boolean {
+    return this.cents === 0n;
+  }
+
+  equals(other: Money): boolean {
+    return this.cents === other.cents && this.currency === other.currency;
+  }
+
+  toDecimal(): string {
+    const whole = this.cents / 100n;
+    const fraction = this.cents % 100n;
+    return `${whole}.${fraction.toString().padStart(2, '0')}`;
+  }
+
+  private assertSameCurrency(other: Money): void {
+    if (this.currency !== other.currency) {
+      throw new MoneyError(
+        'CURRENCY_MISMATCH',
+        `moedas diferentes: ${this.currency} e ${other.currency}`,
+      );
+    }
+  }
+}
+
+=== src/wallet/wallet.ts ===
+import { Money } from '../shared/money.ts';
+
+export type WalletErrorCode = 'INSUFFICIENT_FUNDS' | 'CURRENCY_MISMATCH';
+
+export class WalletError extends Error {
+  constructor(
+    readonly code: WalletErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WalletError';
+  }
+}
+
+export class Wallet {
+  private constructor(readonly balance: Money) {}
+
+  /** Cria uma carteira com saldo inicial. */
+  static open(initialBalance: Money): Wallet {
+    return new Wallet(initialBalance);
+  }
+
+  /** Devolve uma nova carteira com o valor somado. Não altera a original. */
+  credit(amount: Money): Wallet {
+    this.assertSameCurrency(amount);
+    return new Wallet(this.balance.add(amount));
+  }
+
+  /** Devolve uma nova carteira com o valor subtraído. Recusa saldo insuficiente. */
+  debit(amount: Money): Wallet {
+    this.assertSameCurrency(amount);
+    if (amount.cents > this.balance.cents) {
+      throw new WalletError('INSUFFICIENT_FUNDS', 'saldo insuficiente');
+    }
+    return new Wallet(this.balance.subtract(amount));
+  }
+
+  private assertSameCurrency(amount: Money): void {
+    if (amount.currency !== this.balance.currency) {
+      throw new WalletError(
+        'CURRENCY_MISMATCH',
+        `moedas diferentes: ${this.balance.currency} e ${amount.currency}`,
+      );
+    }
+  }
+}
+
+=== src/wallet/wallet-repository.ts ===
+import { SQL } from 'bun';
+import { Money } from '../shared/money.ts';
+import { Wallet } from './wallet.ts';
+
+export class IdempotencyConflictError extends Error {
+  readonly code = 'IDEMPOTENCY_CONFLICT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'IdempotencyConflictError';
+  }
+}
+
+export type DebitInput = {
+  walletId: string;
+  amount: Money;
+  provider: string;
+  externalTransactionId: string;
+  idempotencyKey: string;
+  payloadHash: string;
+  roundId: string;
+  gameId: string;
+};
+
+export type DebitResult = {
+  balance: Money;
+  idempotentReplay: boolean;
+};
+
+export class WalletRepository {
+  constructor(private readonly db: SQL) {}
+
+  /**
+   * Débito atômico e idempotente.
+   * O FOR UPDATE serializa todas as operações da mesma wallet, então a checagem
+   * de duplicidade feita logo após o lock não sofre race entre instâncias.
+   */
+  async debit(input: DebitInput): Promise<DebitResult> {
+    return this.db.begin(async (tx) => {
+      const [row] = await tx`
+        SELECT player_id::text AS player_id, currency, balance_cents::text AS balance_cents
+        FROM wallet
+        WHERE id = ${input.walletId}
+        FOR UPDATE
+      `;
+      if (!row) {
+        throw new Error('carteira não encontrada');
+      }
+
+      // Replay: a mesma transação externa já foi processada?
+      const [existing] = await tx`
+        SELECT wallet_id::text AS wallet_id,
+               payload_hash,
+               balance_after_cents::text AS balance_after_cents
+        FROM wager_transaction
+        WHERE provider_id = ${input.provider}
+          AND external_transaction_id = ${input.externalTransactionId}
+      `;
+      if (existing) {
+        if (existing.wallet_id !== input.walletId || existing.payload_hash !== input.payloadHash) {
+          throw new IdempotencyConflictError(
+            'mesma chave de idempotência com payload ou carteira diferente',
+          );
+        }
+        return {
+          balance: Money.fromCents(BigInt(existing.balance_after_cents), input.amount.currency),
+          idempotentReplay: true,
+        };
+      }
+
+      const current = Money.fromCents(BigInt(row.balance_cents), row.currency);
+      // Lança INSUFFICIENT_FUNDS ou CURRENCY_MISMATCH; o throw faz ROLLBACK de tudo.
+      const newBalance = Wallet.open(current).debit(input.amount).balance;
+      const transactionId = crypto.randomUUID();
+
+      await tx`
+        INSERT INTO wager_transaction (
+          id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+          wallet_id, player_id, round_id, game_id, kind, currency, amount_cents,
+          status, balance_after_cents
+        ) VALUES (
+          ${transactionId}, ${input.provider}, ${input.externalTransactionId},
+          ${input.idempotencyKey}, ${input.payloadHash},
+          ${input.walletId}, ${row.player_id}, ${input.roundId}, ${input.gameId},
+          'BET', ${input.amount.currency}, ${input.amount.cents.toString()}::bigint,
+          'PROCESSED', ${newBalance.cents.toString()}::bigint
+        )
+      `;
+
+      await tx`
+        INSERT INTO wallet_ledger_entry (
+          id, wallet_id, transaction_id, direction, amount_cents, balance_after_cents
+        ) VALUES (
+          ${crypto.randomUUID()}, ${input.walletId}, ${transactionId}, 'DEBIT',
+          ${input.amount.cents.toString()}::bigint, ${newBalance.cents.toString()}::bigint
+        )
+      `;
+
+      await tx`
+        UPDATE wallet
+        SET balance_cents = ${newBalance.cents.toString()}::bigint,
+            version = version + 1,
+            updated_at = now()
+        WHERE id = ${input.walletId}
+      `;
+
+      return { balance: newBalance, idempotentReplay: false };
+    });
+  }
+}
+
+=== src/wallet/wallet-idempotency.test.ts ===
+import { describe, expect, test } from 'bun:test';
+import { SQL } from 'bun';
+import { Money } from '../shared/money.ts';
+import { IdempotencyConflictError, WalletRepository } from './wallet-repository.ts';
+
+const url = process.env.DATABASE_URL;
+if (!url) {
+  throw new Error('Defina DATABASE_URL antes de rodar este teste');
+}
+
+const db = new SQL(url);
+const repo = new WalletRepository(db);
+
+async function createWallet(balance: string): Promise<string> {
+  const id = crypto.randomUUID();
+  const cents = Money.fromDecimal(balance, 'BRL').cents.toString();
+  await db`
+    INSERT INTO wallet (id, player_id, currency, balance_cents)
+    VALUES (${id}, ${crypto.randomUUID()}, 'BRL', ${cents}::bigint)
+  `;
+  return id;
+}
+
+function debitWith(walletId: string, externalId: string, value: string, payloadHash = 'hash-a') {
+  return repo.debit({
+    walletId,
+    amount: Money.fromDecimal(value, 'BRL'),
+    provider: 'provider-teste',
+    externalTransactionId: externalId,
+    idempotencyKey: `provider-teste:${externalId}`,
+    payloadHash,
+    roundId: 'round-teste',
+    gameId: 'game-teste',
+  });
+}
+
+describe('WalletRepository: idempotência do débito', () => {
+  test('mesma aposta enviada 50 vezes em paralelo gera um único débito', async () => {
+    const walletId = await createWallet('100.00');
+    const externalId = crypto.randomUUID();
+
+    const results = await Promise.all(
+      Array.from({ length: 50 }, () => debitWith(walletId, externalId, '25.00')),
+    );
+
+    expect(results.filter((r) => r.idempotentReplay).length).toBe(49);
+    expect(results.filter((r) => !r.idempotentReplay).length).toBe(1);
+    for (const r of results) {
+      expect(r.balance.cents).toBe(7500n);
+    }
+
+    const [wallet] = await db`
+      SELECT balance_cents::text AS balance_cents FROM wallet WHERE id = ${walletId}
+    `;
+    expect(wallet.balance_cents).toBe('7500');
+
+    const [{ count }] = await db`
+      SELECT count(*)::int AS count FROM wallet_ledger_entry WHERE wallet_id = ${walletId}
+    `;
+    expect(count).toBe(1);
+  });
+
+  test('mesma chave com payload diferente é conflito, não replay', async () => {
+    const walletId = await createWallet('100.00');
+    const externalId = crypto.randomUUID();
+
+    await debitWith(walletId, externalId, '25.00', 'hash-a');
+
+    const second = debitWith(walletId, externalId, '30.00', 'hash-b');
+    await expect(second).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+    const [wallet] = await db`
+      SELECT balance_cents::text AS balance_cents FROM wallet WHERE id = ${walletId}
+    `;
+    expect(wallet.balance_cents).toBe('7500');
+  });
+});
+
+=== docker-compose.yml ===
+services:
+  db:
+    image: postgres:16
+    container_name: jungle-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  sqs:
+    image: ministackorg/ministack
+    container_name: jungle-ministack
+    restart: unless-stopped
+    ports:
+      - "4566:4566"
+
+volumes:
+  pgdata:
+
