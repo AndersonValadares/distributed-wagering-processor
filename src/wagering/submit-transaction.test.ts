@@ -17,6 +17,7 @@ const orm = await MikroORM.init({
   discovery: { warnWhenNoEntities: false },
 });
 const useCase = new SubmitTransactionUseCase(orm);
+const RUN = crypto.randomUUID().slice(0, 8); // isola cada execução dos testes
 afterAll(async () => { await orm.close(); });
 
 async function createWallet(balance: string) {
@@ -34,7 +35,7 @@ type W = Awaited<ReturnType<typeof createWallet>>;
 
 function input(w: W, ext: string, amount: string, over: Partial<SubmitInput> = {}): SubmitInput {
   return {
-    providerId: 'provider-teste',
+    providerId: `provider-teste-${RUN}`,
     externalTransactionId: ext,
     idempotencyKey: `provider-teste:${ext}`,
     playerId: w.playerId,
