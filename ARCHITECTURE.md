@@ -43,13 +43,11 @@ HTTP e SQS reutilizam o mesmo use case. O domínio (`Money`, `Wallet`, `WagerTra
 
 **Máquina de estados.** `PENDING → PROCESSED | REJECTED | FAILED | PENDING_REFERENCE`; `PENDING_REFERENCE → PROCESSED | REJECTED | FAILED`. Terminais não mudam; tentar é erro de programação (`InvalidTransactionStateError`).
 
-**Autenticação: não implementada.** Fora da pontuação. Ponto de extensão: um `AuthGuard` global do NestJS validando JWT de um IdP externo (Keycloak/Zitadel via OIDC); `/health/*` ficaria público e o `providerId` seria derivado do token. Não há tabela de usuários nem hash de senha por decisão.
-
-**Health.** `/health/live` não toca em dependências; `/health/ready` checa PostgreSQL e SQS (timeout de 2s) e devolve 503 se qualquer um falhar.
+**Autenticação: não implementada.** Fora da pontuação. Ponto de extensão: um `AuthGuard` global do NestJS validando JWT de um IdP externo (Keycloak/Zitadel via OIDC); `/health/*` ficaria público e o `providerId` seria derivado do token. Não há tabela de usuários nem hash de senha por decisão. O ponto de extensão existe no código: src/auth/auth.guard.ts (guard global no-op).
 
 **Health.** `/health/live` não toca em dependências; `/health/ready` checa PostgreSQL e SQS (timeout de 2s) e devolve 503 com o detalhe de cada check.
 
-**Métricas.** `GET /metrics` (formato Prometheus). Valores que vivem no banco (transações por status, outbox pendente e lag, `PENDING_REFERENCE`, inbox) são calculados por consulta e valem para todas as instâncias. Contadores de processo (duplicatas, conflitos de idempotência, retries do consumer, mensagens na DLQ, histograma de latência) ficam em memória por instância e devem ser somados pelo coletor. Limitação: conflitos de lock não são medidos diretamente (o lock pessimista espera, não falha); o tempo de espera aparece no histograma de latência.
+**Métricas.** `GET /metrics` (formato Prometheus). Valores que vivem no banco (transações por status, outbox pendente e lag, `PENDING_REFERENCE`, inbox) são calculados por consulta e valem para todas as instâncias. Contadores de processo (duplicatas, conflitos de idempotência, retries do consumer, mensagens na DLQ, histograma de latência) ficam em memória por instância e devem ser somados pelo coletor. Conflitos de lock não são medidos diretamente (o lock pessimista espera, não falha); o tempo de espera aparece no histograma de latência.
 
 ## Mapeamento HTTP
 
@@ -58,9 +56,12 @@ Ver tabela no README. Regra: erros de domínio passam por um único filtro (`Dom
 ## Limitações conhecidas
 
 - Eventos de integração são JSON montado no use case, **não** classes `IntegrationEvent` (sem tipagem por subclasse).
-- `wallet-repository.ts` (versão inicial do débito) permanece no repositório só por seus testes de concorrência; não é usado em produção.
 - Erro permanente do consumer depende do redrive do SQS (5 recebimentos) em vez de DLQ explícita.
 - SIGTERM verificado manualmente, sem teste automatizado; não há teste automatizado de reinício do serviço inteiro.
 - Sem teste de carga e sem double-entry.
 - Rejeição por referência de outra wallet/player/provider usa `REFERENCE_MISMATCH`; reversões parciais fora de escopo (conforme enunciado).
 - Migrations: o runner aplica `.up.sql` em ordem e `migrate:down` desfaz só a última.
+- Observabilidade parcial: logs JSON existem no consumer e na reconciliação; o restante da aplicação usa o logger padrão do NestJS (sem `correlationId` em todas as linhas).
+- Em ambiente de teste o outbox acumula eventos pendentes (os testes não rodam o publisher); em produção o publisher roda continuamente.
+- A wallet inexistente numa mensagem SQS é tratada como erro permanente (vai para a DLQ após 5 recebimentos), embora uma wallet criada logo depois pudesse resolver o caso.
+- Os eventos da outbox usam o envelope (`eventId`, `eventType`, `aggregateId`, `correlationId`, `occurredAt`, `version`, `data`), sem `causationId` e sem subclasses de `IntegrationEvent`.
