@@ -1,4 +1,5 @@
-import type { EntityManager, MikroORM } from '@mikro-orm/postgresql';
+import { Injectable } from '@nestjs/common';
+import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { Money } from '../shared/money.ts';
 import { Wallet } from '../wallet/wallet.ts';
 import { applyTransaction } from './apply-transaction.ts';
@@ -52,7 +53,7 @@ export type SubmitResult = {
 async function query(em: EntityManager, sql: string, params: unknown[]): Promise<Row[]> {
   return (await em.execute(sql, params)) as unknown as Row[];
 }
-
+@Injectable()
 export class SubmitTransactionUseCase {
   constructor(private readonly orm: MikroORM) {}
 
